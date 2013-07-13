@@ -77,7 +77,13 @@ HEADERS += \
 
 isEmpty(BOOST_PATH) {
     message(Building using system dynamic Boost libraries)
-    LIBS += -lboost_program_options
+    macx {
+      INCLUDEPATH += /usr/local/include
+      LIBS += -L/usr/local/lib -lboost_program_options-mt
+    }
+    else {
+      LIBS += -lboost_program_options
+    }
 }
 else {
     message(Building using static Boost libraries at $$BOOST_PATH)
