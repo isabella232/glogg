@@ -4,76 +4,85 @@
 TARGET = glogg
 TEMPLATE = app
 
-greaterThan(QT_VERSION, "5.0.0") {
-  QT += widgets
-}
+greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
 win32:Debug:CONFIG += console
 # Necessary when cross-compiling:
 win32:Release:QMAKE_LFLAGS += "-Wl,-subsystem,windows"
 
 # Input
-SOURCES += main.cpp \
-    mainwindow.cpp \
-    crawlerwidget.cpp \
-    abstractlogdata.cpp \
-    logdata.cpp \
-    logfiltereddata.cpp \
-    abstractlogview.cpp \
-    logmainview.cpp \
-    filteredview.cpp \
-    optionsdialog.cpp \
-    persistentinfo.cpp \
-    configuration.cpp \
-    filtersdialog.cpp \
-    filterset.cpp \
-    savedsearches.cpp \
-    infoline.cpp \
-    logdataworkerthread.cpp \
-    logfiltereddataworkerthread.cpp \
-    filewatcher.cpp \
-    selection.cpp \
-    quickfind.cpp \
-    quickfindpattern.cpp \
-    quickfindwidget.cpp \
-    sessioninfo.cpp \
-    recentfiles.cpp \
-    menuactiontooltipbehavior.cpp \
-    overview.cpp \
-    overviewwidget.cpp \
-    marks.cpp
+SOURCES += \
+    src/main.cpp \
+    src/session.cpp \
+    src/data/abstractlogdata.cpp \
+    src/data/logdata.cpp \
+    src/data/logfiltereddata.cpp \
+    src/data/logfiltereddataworkerthread.cpp \
+    src/data/logdataworkerthread.cpp \
+    src/mainwindow.cpp \
+    src/crawlerwidget.cpp \
+    src/abstractlogview.cpp \
+    src/logmainview.cpp \
+    src/filteredview.cpp \
+    src/optionsdialog.cpp \
+    src/persistentinfo.cpp \
+    src/configuration.cpp \
+    src/filtersdialog.cpp \
+    src/filterset.cpp \
+    src/savedsearches.cpp \
+    src/infoline.cpp \
+    src/menuactiontooltipbehavior.cpp \
+    src/filewatcher.cpp \
+    src/selection.cpp \
+    src/quickfind.cpp \
+    src/quickfindpattern.cpp \
+    src/quickfindwidget.cpp \
+    src/sessioninfo.cpp \
+    src/recentfiles.cpp \
+    src/overview.cpp \
+    src/overviewwidget.cpp \
+    src/marks.cpp \
+    src/quickfindmux.cpp \
+    src/signalmux.cpp
+
+INCLUDEPATH += src/
 
 HEADERS += \
-    mainwindow.h \
-    crawlerwidget.h \
-    logmainview.h \
-    log.h \
-    filteredview.h \
-    abstractlogdata.h \
-    logdata.h \
-    logfiltereddata.h \
-    abstractlogview.h \
-    optionsdialog.h \
-    persistentinfo.h \
-    configuration.h \
-    filtersdialog.h \
-    filterset.h \
-    savedsearches.h \
-    infoline.h \
-    logdataworkerthread.h \
-    logfiltereddataworkerthread.h \
-    filewatcher.h \
-    selection.h \
-    quickfind.h \
-    quickfindpattern.h \
-    quickfindwidget.h \
-    sessioninfo.h \
-    persistable.h \
-    recentfiles.h \
-    menuactiontooltipbehavior.h \
-    overview.h \
-    overviewwidget.h \
-    marks.h
+    src/data/abstractlogdata.h \
+    src/data/logdata.h \
+    src/data/logfiltereddata.h \
+    src/data/logfiltereddataworkerthread.h \
+    src/data/logdataworkerthread.h \
+    src/mainwindow.h \
+    src/session.h \
+    src/viewinterface.h \
+    src/crawlerwidget.h \
+    src/logmainview.h \
+    src/log.h \
+    src/filteredview.h \
+    src/abstractlogview.h \
+    src/optionsdialog.h \
+    src/persistentinfo.h \
+    src/configuration.h \
+    src/filtersdialog.h \
+    src/filterset.h \
+    src/savedsearches.h \
+    src/infoline.h \
+    src/filewatcher.h \
+    src/selection.h \
+    src/quickfind.h \
+    src/quickfindpattern.h \
+    src/quickfindwidget.h \
+    src/sessioninfo.h \
+    src/persistable.h \
+    src/recentfiles.h \
+    src/menuactiontooltipbehavior.h \
+    src/overview.h \
+    src/overviewwidget.h \
+    src/marks.h \
+    src/qfnotifications.h \
+    src/quickfindmux.h \
+    src/signalmux.h
 
 isEmpty(BOOST_PATH) {
     message(Building using system dynamic Boost libraries)
@@ -94,15 +103,8 @@ else {
     INCLUDEPATH += $$BOOST_PATH
 }
 
-FORMS += optionsdialog.ui
-
-greaterThan(QT_VERSION, "4.4.0") {
-    FORMS += filtersdialog.ui
-}
-else {
-    message(Using old FiltersDialog)
-    FORMS += filtersdialog_old.ui
-}
+FORMS += src/optionsdialog.ui
+FORMS += src/filtersdialog.ui
 
 # For Windows icon
 RC_FILE = glogg.rc
@@ -151,12 +153,32 @@ debug:OBJECTS_DIR = $${OUT_PWD}/.obj/debug-shared
 release:OBJECTS_DIR = $${OUT_PWD}/.obj/release-shared
 debug:MOC_DIR = $${OUT_PWD}/.moc/debug-shared
 release:MOC_DIR = $${OUT_PWD}/.moc/release-shared
+debug:UI_DIR = $${OUT_PWD}/.ui/debug-shared
+release:UI_DIR = $${OUT_PWD}/.ui/release-shared
 
 # Debug symbols in debug builds
 debug:QMAKE_CXXFLAGS += -g
 
+# Which compiler are we using
+system( g++ --version | grep -e " 4\.6" ) {
+    message ( "g++ version < 4.7, supports C++0x" )
+    CONFIG += C++0x
+}
+else {
+    system( g++ --version | grep -e " 4\.[7-9]" ) {
+        message ( "g++ version 4.7 or newer, supports C++11" )
+        CONFIG += C++11
+    }
+    else {
+        error ( "glogg requires g++ version 4.6 or later" )
+    }
+}
+
 # Extra compiler arguments
 # QMAKE_CXXFLAGS += -Weffc++
+QMAKE_CXXFLAGS += -Wextra
+C++0x:QMAKE_CXXFLAGS += -std=c++0x
+C++11:QMAKE_CXXFLAGS += -std=c++11
 
 GPROF {
     QMAKE_CXXFLAGS += -pg
