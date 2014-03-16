@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009, 2010, 2011, 2013 Nicolas Bonnefon and other contributors
+ * Copyright (C) 2009, 2010, 2011, 2013, 2014 Nicolas Bonnefon and other contributors
  *
  * This file is part of glogg.
  *
@@ -27,6 +27,9 @@
 #include "crawlerwidget.h"
 #include "infoline.h"
 #include "signalmux.h"
+#include "tabbedcrawlerwidget.h"
+#include "quickfindwidget.h"
+#include "quickfindmux.h"
 
 class QAction;
 class Session;
@@ -44,6 +47,8 @@ class MainWindow : public QMainWindow
     // The ownership of the session is transferred to us
     MainWindow( std::unique_ptr<Session> session );
 
+    // Re-load the files from the previous session
+    void reloadSession();
     // Loads the initial file (parameter passed or from config file)
     void loadInitialFile( QString fileName );
 
@@ -52,6 +57,7 @@ class MainWindow : public QMainWindow
     // Drag and drop support
     void dragEnterEvent( QDragEnterEvent* event );
     void dropEvent( QDropEvent* event );
+    void keyPressEvent( QKeyEvent* keyEvent );
 
   private slots:
     void open();
@@ -82,12 +88,25 @@ class MainWindow : public QMainWindow
     // without the progress gauge and with file info
     void displayNormalStatus( bool success );
 
+    // Close the tab with the passed index
+    void closeTab( int index );
+    // Setup the tab with current index for view
+    void currentTabChanged( int index );
+
+    // Instructs the widget to change the pattern in the QuickFind widget
+    // and confirm it.
+    void changeQFPattern( const QString& newPattern );
 
   signals:
     // Is emitted when new settings must be used
     void optionsChanged();
     // Is emitted when the 'follow' option is enabled/disabled
     void followSet( bool checked );
+    // Is emitted before the QuickFind box is activated,
+    // to allow crawlers to get search in the right view.
+    void enteringQuickFind();
+    // Emitted when the quickfind bar is closed.
+    void exitingQuickFind();
 
   private:
     void createActions();
@@ -99,17 +118,15 @@ class MainWindow : public QMainWindow
     void readSettings();
     void writeSettings();
     bool loadFile( const QString& fileName );
-    void setCurrentFile( const QString& fileName );
+    void updateTitleBar( const QString& file_name );
     void updateRecentFileActions();
     QString strippedName( const QString& fullFileName ) const;
+    CrawlerWidget* currentCrawlerWidget() const;
+    void displayQuickFindBar( QuickFindMux::QFDirection direction );
 
     std::unique_ptr<Session> session_;
-    SavedSearches *savedSearches;
-    CrawlerWidget *crawlerWidget;
-    RecentFiles& recentFiles;
+    std::shared_ptr<RecentFiles> recentFiles_;
     QString loadingFileName;
-    QString currentFile;
-    QString previousFile;
 
     enum { MaxRecentFiles = 5 };
     QAction *recentFileActions[MaxRecentFiles];
@@ -146,6 +163,15 @@ class MainWindow : public QMainWindow
 
     // Multiplex signals to any of the CrawlerWidgets
     SignalMux signalMux_;
+
+    // QuickFind widget
+    QuickFindWidget quickFindWidget_;
+
+    // Multiplex signals to/from the QuickFindWidget
+    QuickFindMux quickFindMux_;
+
+    // The main widget
+    TabbedCrawlerWidget mainTabWidget_;
 };
 
 #endif

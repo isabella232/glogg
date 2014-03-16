@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009, 2010, 2011, 2013 Nicolas Bonnefon and other contributors
+ * Copyright (C) 2009, 2010, 2011, 2013, 2014 Nicolas Bonnefon and other contributors
  *
  * This file is part of glogg.
  *
@@ -27,6 +27,7 @@
   #include <QtWidgets>
 #endif
 */
+#include <cassert>
 
 #include <QAction>
 #include <QDesktopWidget>
@@ -51,21 +52,22 @@
 #include "filtersdialog.h"
 #include "optionsdialog.h"
 #include "persistentinfo.h"
-#include "savedsearches.h"
 #include "menuactiontooltipbehavior.h"
+#include "tabbedcrawlerwidget.h"
 
 // Returns the size in human readable format
 static QString readableSize( qint64 size );
 
 MainWindow::MainWindow( std::unique_ptr<Session> session ) :
     session_( std::move( session )  ),
-    recentFiles( Persistent<RecentFiles>( "recentFiles" ) ),
+    recentFiles_( Persistent<RecentFiles>( "recentFiles" ) ),
     mainIcon_(),
-    signalMux_()
+    signalMux_(),
+    quickFindMux_( session_->getQuickFindPattern() ),
+    mainTabWidget_()
 {
     createActions();
     createMenus();
-    // createContextMenu();
     createToolBars();
     // createStatusBar();
 
@@ -85,7 +87,97 @@ MainWindow::MainWindow( std::unique_ptr<Session> session ) :
 
     readSettings();
 
-    crawlerWidget = nullptr;
+    // Connect the signals to the mux (they will be forwarded to the
+    // "current" crawlerwidget
+
+    // Send actions to the crawlerwidget
+    signalMux_.connect( this, SIGNAL( followSet( bool ) ),
+            SIGNAL( followSet( bool ) ) );
+    signalMux_.connect( this, SIGNAL( optionsChanged() ),
+            SLOT( applyConfiguration() ) );
+    signalMux_.connect( this, SIGNAL( enteringQuickFind() ),
+            SLOT( enteringQuickFind() ) );
+    signalMux_.connect( &quickFindWidget_, SIGNAL( close() ),
+            SLOT( exitingQuickFind() ) );
+
+    // Actions from the CrawlerWidget
+    signalMux_.connect( SIGNAL( followDisabled() ),
+            this, SLOT( disableFollow() ) );
+    signalMux_.connect( SIGNAL( updateLineNumber( int ) ),
+            this, SLOT( lineNumberHandler( int ) ) );
+
+    // Register for progress status bar
+    signalMux_.connect( SIGNAL( loadingProgressed( int ) ),
+            this, SLOT( updateLoadingProgress( int ) ) );
+    signalMux_.connect( SIGNAL( loadingFinished( bool ) ),
+            this, SLOT( displayNormalStatus( bool ) ) );
+
+    // Configure the main tabbed widget
+    mainTabWidget_.setDocumentMode( true );
+    mainTabWidget_.setMovable( true );
+    //mainTabWidget_.setTabShape( QTabWidget::Triangular );
+    mainTabWidget_.setTabsClosable( true );
+
+    connect( &mainTabWidget_, SIGNAL( tabCloseRequested( int ) ),
+            this, SLOT( closeTab( int ) ) );
+    connect( &mainTabWidget_, SIGNAL( currentChanged( int ) ),
+            this, SLOT( currentTabChanged( int ) ) );
+
+    // Establish the QuickFindWidget and mux ( to send requests from the
+    // QFWidget to the right window )
+    connect( &quickFindWidget_, SIGNAL( patternConfirmed( const QString&, bool ) ),
+             &quickFindMux_, SLOT( confirmPattern( const QString&, bool ) ) );
+    connect( &quickFindWidget_, SIGNAL( patternUpdated( const QString&, bool ) ),
+             &quickFindMux_, SLOT( setNewPattern( const QString&, bool ) ) );
+    connect( &quickFindWidget_, SIGNAL( cancelSearch() ),
+             &quickFindMux_, SLOT( cancelSearch() ) );
+    connect( &quickFindWidget_, SIGNAL( searchForward() ),
+             &quickFindMux_, SLOT( searchForward() ) );
+    connect( &quickFindWidget_, SIGNAL( searchBackward() ),
+             &quickFindMux_, SLOT( searchBackward() ) );
+    connect( &quickFindWidget_, SIGNAL( searchNext() ),
+             &quickFindMux_, SLOT( searchNext() ) );
+
+    // QuickFind changes coming from the views
+    connect( &quickFindMux_, SIGNAL( patternChanged( const QString& ) ),
+             this, SLOT( changeQFPattern( const QString& ) ) );
+    connect( &quickFindMux_, SIGNAL( notify( const QFNotification& ) ),
+             &quickFindWidget_, SLOT( notify( const QFNotification& ) ) );
+    connect( &quickFindMux_, SIGNAL( clearNotification() ),
+             &quickFindWidget_, SLOT( clearNotification() ) );
+
+    // Construct the QuickFind bar
+    quickFindWidget_.hide();
+
+    QWidget* central_widget = new QWidget();
+    QVBoxLayout* main_layout = new QVBoxLayout();
+    main_layout->setContentsMargins( 0, 0, 0, 0 );
+    main_layout->addWidget( &mainTabWidget_ );
+    main_layout->addWidget( &quickFindWidget_ );
+    central_widget->setLayout( main_layout );
+
+    setCentralWidget( central_widget );
+}
+
+void MainWindow::reloadSession()
+{
+    int current_file_index = -1;
+
+    for ( auto open_file: session_->restore(
+               []() { return new CrawlerWidget(); },
+               &current_file_index ) )
+    {
+        QString file_name = { open_file.first.c_str() };
+        CrawlerWidget* crawler_widget = dynamic_cast<CrawlerWidget*>(
+                open_file.second );
+
+        assert( crawler_widget );
+
+        mainTabWidget_.addTab( crawler_widget, strippedName( file_name ) );
+    }
+
+    if ( current_file_index >= 0 )
+        mainTabWidget_.setCurrentIndex( current_file_index );
 }
 
 void MainWindow::loadInitialFile( QString fileName )
@@ -95,8 +187,6 @@ void MainWindow::loadInitialFile( QString fileName )
     // Is there a file passed as argument?
     if ( !fileName.isEmpty() )
         loadFile( fileName );
-    else if ( !previousFile.isEmpty() )
-        loadFile( previousFile );
 }
 
 //
@@ -106,7 +196,8 @@ void MainWindow::loadInitialFile( QString fileName )
 // Menu actions
 void MainWindow::createActions()
 {
-    Configuration& config = Persistent<Configuration>( "settings" );
+    std::shared_ptr<Configuration> config =
+        Persistent<Configuration>( "settings" );
 
     openAction = new QAction(tr("&Open..."), this);
     openAction->setShortcut(QKeySequence::Open);
@@ -146,21 +237,21 @@ void MainWindow::createActions()
 
     overviewVisibleAction = new QAction( tr("Matches &overview"), this );
     overviewVisibleAction->setCheckable( true );
-    overviewVisibleAction->setChecked( config.isOverviewVisible() );
+    overviewVisibleAction->setChecked( config->isOverviewVisible() );
     connect( overviewVisibleAction, SIGNAL( toggled( bool ) ),
             this, SLOT( toggleOverviewVisibility( bool )) );
 
     lineNumbersVisibleInMainAction =
         new QAction( tr("Line &numbers in main view"), this );
     lineNumbersVisibleInMainAction->setCheckable( true );
-    lineNumbersVisibleInMainAction->setChecked( config.mainLineNumbersVisible() );
+    lineNumbersVisibleInMainAction->setChecked( config->mainLineNumbersVisible() );
     connect( lineNumbersVisibleInMainAction, SIGNAL( toggled( bool ) ),
             this, SLOT( toggleMainLineNumbersVisibility( bool )) );
 
     lineNumbersVisibleInFilteredAction =
         new QAction( tr("Line &numbers in filtered view"), this );
     lineNumbersVisibleInFilteredAction->setCheckable( true );
-    lineNumbersVisibleInFilteredAction->setChecked( config.filteredLineNumbersVisible() );
+    lineNumbersVisibleInFilteredAction->setChecked( config->filteredLineNumbersVisible() );
     connect( lineNumbersVisibleInFilteredAction, SIGNAL( toggled( bool ) ),
             this, SLOT( toggleFilteredLineNumbersVisibility( bool )) );
 
@@ -177,7 +268,7 @@ void MainWindow::createActions()
 
     stopAction = new QAction( tr("&Stop"), this );
     stopAction->setIcon( QIcon(":/images/stop16.png") );
-    stopAction->setEnabled( false );
+    stopAction->setEnabled( true );
     signalMux_.connect( stopAction, SIGNAL(triggered()), SLOT(stopLoading()) );
 
     filtersAction = new QAction(tr("&Filters..."), this);
@@ -269,8 +360,10 @@ void MainWindow::open()
     QString defaultDir = ".";
 
     // Default to the path of the current file if there is one
-    if ( !currentFile.isEmpty() ) {
-        QFileInfo fileInfo = QFileInfo( currentFile );
+    if ( auto current = currentCrawlerWidget() )
+    {
+        std::string current_file = session_->getFilename( current );
+        QFileInfo fileInfo = QFileInfo( QString( current_file.c_str() ) );
         defaultDir = fileInfo.path();
     }
 
@@ -291,41 +384,49 @@ void MainWindow::openRecentFile()
 // Select all the text in the currently selected view
 void MainWindow::selectAll()
 {
-    crawlerWidget->selectAll();
+    CrawlerWidget* current = currentCrawlerWidget();
+
+    if ( current )
+        current->selectAll();
 }
 
 // Copy the currently selected line into the clipboard
 void MainWindow::copy()
 {
     static QClipboard* clipboard = QApplication::clipboard();
+    CrawlerWidget* current = currentCrawlerWidget();
 
-    clipboard->setText( crawlerWidget->getSelectedText() );
+    if ( current ) {
+        clipboard->setText( current->getSelectedText() );
 
-    // Put it in the global selection as well (X11 only)
-    clipboard->setText( crawlerWidget->getSelectedText(),
-            QClipboard::Selection );
+        // Put it in the global selection as well (X11 only)
+        clipboard->setText( current->getSelectedText(),
+                QClipboard::Selection );
+    }
 }
 
 // Display the QuickFind bar
 void MainWindow::find()
 {
-    crawlerWidget->displayQuickFindBar( QuickFindMux::Forward );
+    displayQuickFindBar( QuickFindMux::Forward );
 }
 
 // Opens the 'Filters' dialog box
 void MainWindow::filters()
 {
     FiltersDialog dialog(this);
-    connect(&dialog, SIGNAL( optionsChanged() ), crawlerWidget, SLOT( applyConfiguration() ));
+    signalMux_.connect(&dialog, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ));
     dialog.exec();
+    signalMux_.disconnect(&dialog, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ));
 }
 
 // Opens the 'Options' modal dialog box
 void MainWindow::options()
 {
     OptionsDialog dialog(this);
-    connect(&dialog, SIGNAL( optionsChanged() ), crawlerWidget, SLOT( applyConfiguration() ));
+    signalMux_.connect(&dialog, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ));
     dialog.exec();
+    signalMux_.disconnect(&dialog, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ));
 }
 
 // Opens the 'About' dialog box.
@@ -337,7 +438,7 @@ void MainWindow::about()
 #ifdef GLOGG_COMMIT
                 "<p>Built " GLOGG_DATE " from " GLOGG_COMMIT
 #endif
-                "<p>Copyright &copy; 2009, 2010, 2011, 2012, 2013 Nicolas Bonnefon and other contributors"
+                "<p>Copyright &copy; 2009, 2010, 2011, 2012, 2013, 2014 Nicolas Bonnefon and other contributors"
                 "<p>You may modify and redistribute the program under the terms of the GPL (version 3 or later)." ) );
 }
 
@@ -348,22 +449,25 @@ void MainWindow::aboutQt()
 
 void MainWindow::toggleOverviewVisibility( bool isVisible )
 {
-    Configuration& config = Persistent<Configuration>( "settings" );
-    config.setOverviewVisible( isVisible );
+    std::shared_ptr<Configuration> config =
+        Persistent<Configuration>( "settings" );
+    config->setOverviewVisible( isVisible );
     emit optionsChanged();
 }
 
 void MainWindow::toggleMainLineNumbersVisibility( bool isVisible )
 {
-    Configuration& config = Persistent<Configuration>( "settings" );
-    config.setMainLineNumbersVisible( isVisible );
+    std::shared_ptr<Configuration> config =
+        Persistent<Configuration>( "settings" );
+    config->setMainLineNumbersVisible( isVisible );
     emit optionsChanged();
 }
 
 void MainWindow::toggleFilteredLineNumbersVisibility( bool isVisible )
 {
-    Configuration& config = Persistent<Configuration>( "settings" );
-    config.setFilteredLineNumbersVisible( isVisible );
+    std::shared_ptr<Configuration> config =
+        Persistent<Configuration>( "settings" );
+    config->setFilteredLineNumbersVisible( isVisible );
     emit optionsChanged();
 }
 
@@ -382,13 +486,18 @@ void MainWindow::updateLoadingProgress( int progress )
 {
     LOG(logDEBUG) << "Loading progress: " << progress;
 
+    QString current_file =
+        session_->getFilename( currentCrawlerWidget() ).c_str();
+
     // We ignore 0% and 100% to avoid a flash when the file (or update)
     // is very short.
     if ( progress > 0 && progress < 100 ) {
-        infoLine->setText( loadingFileName + tr( " - Indexing lines... (%1 %)" ).arg( progress ) );
+        infoLine->setText( current_file +
+                tr( " - Indexing lines... (%1 %)" ).arg( progress ) );
         infoLine->displayGauge( progress );
 
         stopAction->setEnabled( true );
+        reloadAction->setEnabled( false );
     }
 }
 
@@ -396,35 +505,99 @@ void MainWindow::displayNormalStatus( bool success )
 {
     QLocale defaultLocale;
 
-    LOG(logDEBUG) << "displayNormalStatus";
+    LOG(logDEBUG) << "displayNormalStatus success=" << success;
+
+    // No file is loading
+    loadingFileName.clear();
 
     if ( success )
-        setCurrentFile( loadingFileName );
+    {
+        // Following should always work as we will only receive enter
+        // this slot if there is a crawler connected.
+        QString current_file =
+            session_->getFilename( currentCrawlerWidget() ).c_str();
 
-    uint64_t fileSize;
-    uint32_t fileNbLine;
-    QDateTime lastModified;
+        uint64_t fileSize;
+        uint32_t fileNbLine;
+        QDateTime lastModified;
 
-    session_->getFileInfo( crawlerWidget,
-            &fileSize, &fileNbLine, &lastModified );
-    if ( lastModified.isValid() ) {
-        const QString date =
-            defaultLocale.toString( lastModified, QLocale::NarrowFormat );
-        infoLine->setText( tr( "%1 (%2 - %3 lines - modified on %4)" )
-                .arg(currentFile).arg(readableSize(fileSize))
-                .arg(fileNbLine).arg( date ) );
+        session_->getFileInfo( currentCrawlerWidget(),
+                &fileSize, &fileNbLine, &lastModified );
+        if ( lastModified.isValid() ) {
+            const QString date =
+                defaultLocale.toString( lastModified, QLocale::NarrowFormat );
+            infoLine->setText( tr( "%1 (%2 - %3 lines - modified on %4)" )
+                    .arg(current_file).arg(readableSize(fileSize))
+                    .arg(fileNbLine).arg( date ) );
+        }
+        else {
+            infoLine->setText( tr( "%1 (%2 - %3 lines)" )
+                    .arg(current_file).arg(readableSize(fileSize))
+                    .arg(fileNbLine) );
+        }
+
+        infoLine->hideGauge();
+        stopAction->setEnabled( false );
+        reloadAction->setEnabled( true );
+
+        // Now everything is ready, we can finally show the file!
+        currentCrawlerWidget()->show();
     }
-    else {
-        infoLine->setText( tr( "%1 (%2 - %3 lines)" )
-                .arg(currentFile).arg(readableSize(fileSize))
-                .arg(fileNbLine) );
+    else
+    {
+        closeTab( mainTabWidget_.currentIndex()  );
     }
 
-    infoLine->hideGauge();
-    stopAction->setEnabled( false );
+    // mainTabWidget_.setEnabled( true );
+}
 
-    // Now everything is ready, we can finally show the file!
-    crawlerWidget->show();
+void MainWindow::closeTab( int index )
+{
+    auto widget = dynamic_cast<CrawlerWidget*>(
+            mainTabWidget_.widget( index ) );
+
+    assert( widget );
+
+    widget->stopLoading();
+    mainTabWidget_.removeTab( index );
+    session_->close( widget );
+    delete widget;
+}
+
+void MainWindow::currentTabChanged( int index )
+{
+    LOG(logDEBUG) << "currentTabChanged";
+
+    if ( index >= 0 )
+    {
+        CrawlerWidget* crawler_widget = dynamic_cast<CrawlerWidget*>(
+                mainTabWidget_.widget( index ) );
+        signalMux_.setCurrentDocument( crawler_widget );
+        quickFindMux_.registerSelector( crawler_widget );
+
+        // New tab is set up with fonts etc...
+        emit optionsChanged();
+
+        // Update the title bar
+        updateTitleBar( QString(
+                    session_->getFilename( crawler_widget ).c_str() ) );
+    }
+    else
+    {
+        // No tab left
+        signalMux_.setCurrentDocument( nullptr );
+        quickFindMux_.registerSelector( nullptr );
+
+        infoLine->hideGauge();
+        infoLine->clear();
+
+        updateTitleBar( QString() );
+    }
+}
+
+void MainWindow::changeQFPattern( const QString& newPattern )
+{
+    quickFindWidget_.changeDisplayedPattern( newPattern );
 }
 
 //
@@ -459,6 +632,25 @@ void MainWindow::dropEvent( QDropEvent* event )
     loadFile( fileName );
 }
 
+void MainWindow::keyPressEvent( QKeyEvent* keyEvent )
+{
+    LOG(logDEBUG4) << "keyPressEvent received";
+
+    switch ( (keyEvent->text())[0].toLatin1() ) {
+        case '/':
+            displayQuickFindBar( QuickFindMux::Forward );
+            break;
+        case '?':
+            displayQuickFindBar( QuickFindMux::Backward );
+            break;
+        default:
+            keyEvent->ignore();
+    }
+
+    if ( !keyEvent->isAccepted() )
+        QMainWindow::keyPressEvent( keyEvent );
+}
+
 //
 // Private functions
 //
@@ -470,48 +662,44 @@ bool MainWindow::loadFile( const QString& fileName )
 {
     LOG(logDEBUG) << "loadFile ( " << fileName.toStdString() << " )";
 
-    // First get the global search history
-    savedSearches = &(Persistent<SavedSearches>( "savedSearches" ));
-
     // Load the file
     loadingFileName = fileName;
 
-    crawlerWidget = dynamic_cast<CrawlerWidget*>( session_->open( fileName.toStdString(),
-            [this]() { return new CrawlerWidget( savedSearches, this ); } ) );
+    try {
+        CrawlerWidget* crawler_widget = dynamic_cast<CrawlerWidget*>(
+                session_->open( fileName.toStdString(),
+                    []() { return new CrawlerWidget(); } ) );
+        assert( crawler_widget );
 
-    // We won't show the widget until the file is fully loaded
-    crawlerWidget->hide();
+        // We won't show the widget until the file is fully loaded
+        crawler_widget->hide();
 
-    signalMux_.setCurrentDocument( crawlerWidget );
+        // We disable the tab widget to avoid having someone switch
+        // tab during loading. (maybe FIXME)
+        //mainTabWidget_.setEnabled( false );
 
-    // Send actions to the crawlerwidget
-    signalMux_.connect( this, SIGNAL( followSet( bool ) ),
-            SIGNAL( followSet( bool ) ) );
-    signalMux_.connect( this, SIGNAL( optionsChanged() ),
-            SLOT( applyConfiguration() ) );
+        int index = mainTabWidget_.addTab(
+                crawler_widget, strippedName( fileName ) );
 
-    // Actions from the CrawlerWidget
-    signalMux_.connect( SIGNAL( followDisabled() ),
-            this, SLOT( disableFollow() ) );
-    signalMux_.connect( SIGNAL( updateLineNumber( int ) ),
-            this, SLOT( lineNumberHandler( int ) ) );
+        // Setting the new tab, the user will see a blank page for the duration
+        // of the loading, with no way to switch to another tab
+        mainTabWidget_.setCurrentIndex( index );
 
-    // FIXME: is it necessary?
-    emit optionsChanged();
-
-    // We start with the empty file
-    setCurrentFile( "" );
-
-    // Register for progress status bar
-    signalMux_.connect( SIGNAL( loadingProgressed( int ) ),
-            this, SLOT( updateLoadingProgress( int ) ) );
-    signalMux_.connect( SIGNAL( loadingFinished( bool ) ),
-            this, SLOT( displayNormalStatus( bool ) ) );
-
-    setCentralWidget(crawlerWidget);
+        // Update the recent files list
+        // (reload the list first in case another glogg changed it)
+        GetPersistentInfo().retrieve( "recentFiles" );
+        recentFiles_->addRecent( fileName );
+        GetPersistentInfo().save( "recentFiles" );
+        updateRecentFileActions();
+    }
+    catch ( FileUnreadableErr ) {
+        LOG(logDEBUG) << "Can't open file " << fileName.toStdString();
+        return false;
+    }
 
     LOG(logDEBUG) << "Success loading file " << fileName.toStdString();
     return true;
+
 }
 
 // Strips the passed filename from its directory part.
@@ -520,41 +708,35 @@ QString MainWindow::strippedName( const QString& fullFileName ) const
     return QFileInfo( fullFileName ).fileName();
 }
 
-// Add the filename to the recent files list and update the title bar.
-void MainWindow::setCurrentFile( const QString& fileName )
+// Return the currently active CrawlerWidget, or NULL if none
+CrawlerWidget* MainWindow::currentCrawlerWidget() const
 {
-    if ( fileName != currentFile )
-    {
-        // Change the current file
-        currentFile = fileName;
-        QString shownName = tr( "Untitled" );
-        if ( !currentFile.isEmpty() ) {
-            // (reload the list first in case another glogg changed it)
-            GetPersistentInfo().retrieve( "recentFiles" );
-            recentFiles.addRecent( currentFile );
-            GetPersistentInfo().save( "recentFiles" );
-            updateRecentFileActions();
-            shownName = strippedName( currentFile );
-        }
+    auto current = dynamic_cast<CrawlerWidget*>(
+            mainTabWidget_.currentWidget() );
 
-        setWindowTitle(
-                tr("%1 - %2").arg(shownName).arg(tr("glogg"))
+    return current;
+}
+
+// Update the title bar.
+void MainWindow::updateTitleBar( const QString& file_name )
+{
+    QString shownName = tr( "Untitled" );
+    if ( !file_name.isEmpty() )
+        shownName = strippedName( file_name );
+
+    setWindowTitle(
+            tr("%1 - %2").arg(shownName).arg(tr("glogg"))
 #ifdef GLOGG_COMMIT
-                + " (dev build " GLOGG_VERSION ")"
+            + " (dev build " GLOGG_VERSION ")"
 #endif
-                );
-    }
-    else
-    {
-        // Nothing, happens when e.g., the file is reloaded
-    }
+            );
 }
 
 // Updates the actions for the recent files.
 // Must be called after having added a new name to the list.
 void MainWindow::updateRecentFileActions()
 {
-    QStringList recent_files = recentFiles.recentFiles();
+    QStringList recent_files = recentFiles_->recentFiles();
 
     for ( int j = 0; j < MaxRecentFiles; ++j ) {
         if ( j < recent_files.count() ) {
@@ -576,11 +758,17 @@ void MainWindow::updateRecentFileActions()
 void MainWindow::writeSettings()
 {
     // Save the session
-    SessionInfo& session = Persistent<SessionInfo>( "session" );
-    session.setGeometry( saveGeometry() );
-    session.setCrawlerState( crawlerWidget->saveState() );
-    session.setCurrentFile( currentFile );
-    GetPersistentInfo().save( QString( "session" ) );
+    // Generate the ordered list of widgets and their topLine
+    std::vector<std::pair<const ViewInterface*, uint64_t>> widget_list;
+    for ( int i = 0; i < mainTabWidget_.count(); ++i )
+        widget_list.push_back( {
+                dynamic_cast<const ViewInterface*>( mainTabWidget_.widget( i ) ),
+                0 } );
+    session_->save( widget_list );
+    //SessionInfo& session = Persistent<SessionInfo>( "session" );
+    //session.setGeometry( saveGeometry() );
+    //session.setCrawlerState( crawlerWidget->saveState() );
+    //GetPersistentInfo().save( QString( "session" ) );
 
     // User settings
     GetPersistentInfo().save( QString( "settings" ) );
@@ -590,10 +778,9 @@ void MainWindow::writeSettings()
 void MainWindow::readSettings()
 {
     // Get and restore the session
-    GetPersistentInfo().retrieve( QString( "session" ) );
-    SessionInfo session = Persistent<SessionInfo>( "session" );
-    restoreGeometry( session.geometry() );
-    previousFile = session.currentFile();
+    // GetPersistentInfo().retrieve( QString( "session" ) );
+    // SessionInfo session = Persistent<SessionInfo>( "session" );
+    //restoreGeometry( session.geometry() );
     /*
      * FIXME: should be in the session
     crawlerWidget->restoreState( session.crawlerState() );
@@ -603,9 +790,20 @@ void MainWindow::readSettings()
     GetPersistentInfo().retrieve( QString( "recentFiles" ) );
     updateRecentFileActions();
 
-    GetPersistentInfo().retrieve( QString( "savedSearches" ) );
-    GetPersistentInfo().retrieve( QString( "settings" ) );
+    // GetPersistentInfo().retrieve( QString( "settings" ) );
     GetPersistentInfo().retrieve( QString( "filterSet" ) );
+}
+
+void MainWindow::displayQuickFindBar( QuickFindMux::QFDirection direction )
+{
+    LOG(logDEBUG) << "MainWindow::displayQuickFindBar";
+
+    // Warn crawlers so they can save the position of the focus in order
+    // to do incremental search in the right view.
+    emit enteringQuickFind();
+
+    quickFindMux_.setDirection( direction );
+    quickFindWidget_.userActivate();
 }
 
 // Returns the size in human readable format

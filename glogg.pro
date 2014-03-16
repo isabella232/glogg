@@ -43,7 +43,8 @@ SOURCES += \
     src/overviewwidget.cpp \
     src/marks.cpp \
     src/quickfindmux.cpp \
-    src/signalmux.cpp
+    src/signalmux.cpp \
+    src/tabbedcrawlerwidget.cpp
 
 INCLUDEPATH += src/
 
@@ -82,7 +83,8 @@ HEADERS += \
     src/marks.h \
     src/qfnotifications.h \
     src/quickfindmux.h \
-    src/signalmux.h
+    src/signalmux.h \
+    src/tabbedcrawlerwidget.h
 
 isEmpty(BOOST_PATH) {
     message(Building using system dynamic Boost libraries)
@@ -157,21 +159,15 @@ debug:UI_DIR = $${OUT_PWD}/.ui/debug-shared
 release:UI_DIR = $${OUT_PWD}/.ui/release-shared
 
 # Debug symbols in debug builds
-debug:QMAKE_CXXFLAGS += -g
+# debug:QMAKE_CXXFLAGS += -g -O0
 
 # Which compiler are we using
-system( g++ --version | grep -e " 4\.6" ) {
-    message ( "g++ version < 4.7, supports C++0x" )
-    CONFIG += C++0x
+system( $${QMAKE_CXX} --version | grep -e " 4\.[7-9]" ) {
+    message ( "g++ version 4.7 or newer, supports C++11" )
+    CONFIG += C++11
 }
 else {
-    system( g++ --version | grep -e " 4\.[7-9]" ) {
-        message ( "g++ version 4.7 or newer, supports C++11" )
-        CONFIG += C++11
-    }
-    else {
-        error ( "glogg requires g++ version 4.6 or later" )
-    }
+    CONFIG += C++0x
 }
 
 # Extra compiler arguments

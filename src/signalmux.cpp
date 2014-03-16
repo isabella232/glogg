@@ -114,6 +114,12 @@ void SignalMux::setCurrentDocument( QObject* current_document )
     // And now connect to/from the new document
     for ( auto c: connectionList_ )
         connect( c );
+
+    // And ask the doc to emit all state signals
+    MuxableDocumentInterface* doc =
+        dynamic_cast<MuxableDocumentInterface*>( current_document );
+    if ( doc )
+        doc->sendAllStateSignals();
 }
 
 /*
@@ -123,6 +129,7 @@ void SignalMux::connect( const Connection& connection )
 {
     if ( currentDocument_ )
     {
+        LOG( logDEBUG ) << "SignalMux::connect";
         if ( connection.source && ( ! connection.sink ) )
         {
             // Downstream signal
@@ -146,6 +153,7 @@ void SignalMux::disconnect( const Connection& connection )
 {
     if ( currentDocument_ )
     {
+        LOG( logDEBUG ) << "SignalMux::disconnect";
         if ( connection.source && ( ! connection.sink ) )
         {
             // Downstream signal

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009, 2010, 2011, 2013 Nicolas Bonnefon
+ * Copyright (C) 2009, 2010, 2011, 2013, 2014 Nicolas Bonnefon
  * and other contributors
  *
  * This file is part of glogg.
@@ -34,15 +34,13 @@
 #include "filteredview.h"
 #include "data/logdata.h"
 #include "data/logfiltereddata.h"
-#include "quickfindwidget.h"
-#include "quickfindmux.h"
 #include "viewinterface.h"
+#include "signalmux.h"
+#include "overview.h"
 
 class InfoLine;
 class QuickFindPattern;
-class QuickFindWidget;
 class SavedSearches;
-class Overview;
 class QStandardItemModel;
 class OverviewWidget;
 
@@ -50,12 +48,13 @@ class OverviewWidget;
 // It includes both windows, the search line, the info
 // lines and various buttons.
 class CrawlerWidget : public QSplitter,
-    public QuickFindMuxSelectorInterface, public ViewInterface
+    public QuickFindMuxSelectorInterface, public ViewInterface,
+    public MuxableDocumentInterface
 {
   Q_OBJECT
 
   public:
-    CrawlerWidget( SavedSearches* searches, QWidget *parent=0 );
+    CrawlerWidget( QWidget *parent=0 );
 
     // Get the line number of the first line displayed.
     int getTopLine() const;
@@ -69,10 +68,6 @@ class CrawlerWidget : public QSplitter,
     // is interacting with
     void selectAll();
 
-    // Implementation on the mux selector interface
-    // (for dispatching QuickFind to the right widget)
-    virtual SearchableWidgetInterface* getActiveSearchable() const;
-
   public slots:
     // Stop the asynchoronous loading of the file if one is in progress
     // The file is identified by the view attached to it.
@@ -81,12 +76,22 @@ class CrawlerWidget : public QSplitter,
     void reload();
 
   protected:
-    void keyPressEvent( QKeyEvent* keyEvent );
-
     // Implementation of the ViewInterface functions
     virtual void doSetData(
             std::shared_ptr<LogData> log_data,
             std::shared_ptr<LogFilteredData> filtered_data );
+    virtual void doSetQuickFindPattern(
+            std::shared_ptr<QuickFindPattern> qfp );
+    virtual void doSetSavedSearches(
+            std::shared_ptr<SavedSearches> saved_searches );
+
+    // Implementation of the mux selector interface
+    // (for dispatching QuickFind to the right widget)
+    virtual SearchableWidgetInterface* doGetActiveSearchable() const;
+    virtual std::vector<QObject*> doGetAllSearchables() const;
+
+    // Implementation of the MuxableDocumentInterface
+    virtual void doSendAllStateSignals();
 
   signals:
     // Sent to signal the client load has progressed,
@@ -109,11 +114,17 @@ class CrawlerWidget : public QSplitter,
     void stopSearch();
     // Instructs the widget to reconfigure itself because Config() has changed.
     void applyConfiguration();
+    // QuickFind is being entered, save the focus for incremental qf.
+    void enteringQuickFind();
+    // QuickFind is being closed.
+    void exitingQuickFind();
     // Called when new data must be displayed in the filtered window.
     void updateFilteredView( int nbMatches, int progress );
     // Called when a new line has been selected in the filtered view,
     // to instruct the main view to jump to the matching line.
     void jumpToMatchingLine( int filteredLineNb );
+    // Called when the main view is on a new line number
+    void updateLineNumberHandler( int line );
     // Mark a line that has been clicked on the main (top) view.
     void markLineFromMain( qint64 line );
     // Mark a line that has been clicked on the filtered (bottom) view.
@@ -122,12 +133,6 @@ class CrawlerWidget : public QSplitter,
     void loadingFinishedHandler( bool success );
     // Manages the info lines to inform the user the file has changed.
     void fileChangedHandler( LogData::MonitoredFileStatus );
-
-    void hideQuickFindBar();
-
-    // Instructs the widget to change the pattern in the QuickFind widget
-    // and confirm it.
-    void changeQFPattern( const QString& newPattern );
 
     void searchForward();
     void searchBackward();
@@ -206,7 +211,6 @@ class CrawlerWidget : public QSplitter,
     InfoLine*       searchInfoLine;
     QCheckBox*      ignoreCaseCheck;
     QCheckBox*      searchRefreshCheck;
-    QuickFindWidget* quickFindWidget_;
     OverviewWidget* overviewWidget_;
 
     QVBoxLayout*    bottomMainLayout;
@@ -216,9 +220,10 @@ class CrawlerWidget : public QSplitter,
     // Default palette to be remembered
     QPalette        searchInfoLineDefaultPalette;
 
-    SavedSearches*  savedSearches;
+    std::shared_ptr<SavedSearches> savedSearches_;
 
-    QuickFindMux*   quickFindMux_;
+    // Reference to the QuickFind Pattern (not owned)
+    std::shared_ptr<QuickFindPattern> quickFindPattern_;
 
     LogData*        logData_;
     LogFilteredData* logFilteredData_;
@@ -231,10 +236,17 @@ class CrawlerWidget : public QSplitter,
     SearchState     searchState_;
 
     // Matches overview
-    Overview*       overview_;
+    Overview        overview_;
 
     // Model for the visibility selector
     QStandardItemModel* visibilityModel_;
+
+    // Last main line number received
+    qint64 currentLineNumber_;
+
+    // Are we loading something?
+    // Set to false when we receive a completion message from the LogData
+    bool            loadingInProgress_;
 };
 
 #endif
