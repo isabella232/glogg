@@ -10,6 +10,11 @@ win32:Debug:CONFIG += console
 # Necessary when cross-compiling:
 win32:Release:QMAKE_LFLAGS += "-Wl,-subsystem,windows"
 
+macx {
+        makespec = macx-clang-libc++
+        CONFIG +=c++11
+}
+
 # Input
 SOURCES += \
     src/main.cpp \
